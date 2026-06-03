@@ -1432,6 +1432,182 @@ const outdentSelectedLines = (
   );
 };
 
+const wrapTextWords = (
+  text: string,
+  maxWidth: number,
+  firstPrefix = '',
+  continuationPrefix = firstPrefix,
+): string[] => {
+  const normalizedWords = text.trim().split(/\s+/).filter(Boolean);
+
+  if (!normalizedWords.length) {
+    return [firstPrefix.trimEnd()];
+  }
+
+  const lines: string[] = [];
+  let currentLine = firstPrefix;
+
+  normalizedWords.forEach((word) => {
+    const candidate = `${currentLine}${currentLine.trim().length ? ' ' : ''}${word}`;
+    if (candidate.length <= maxWidth || currentLine === firstPrefix) {
+      currentLine = candidate;
+      return;
+    }
+
+    lines.push(currentLine.trimEnd());
+    currentLine = `${continuationPrefix}${word}`;
+  });
+
+  if (currentLine.trim().length) {
+    lines.push(currentLine.trimEnd());
+  }
+
+  return lines;
+};
+
+const wrapCodeLikeLine = (line: string, maxWidth: number): string[] => {
+  if (line.length <= maxWidth) {
+    return [line];
+  }
+
+  const leadingIndent = line.match(/^\s*/)?.[0] ?? '';
+  const trimmedLine = line.trim();
+  const continuationIndent = `${leadingIndent}    `;
+  const commentMatch = trimmedLine.match(/^(\/\/+\s*|#\s*|\*\s*)(.*)$/);
+
+  if (commentMatch) {
+    const [, marker, commentBody] = commentMatch;
+    return wrapTextWords(
+      commentBody,
+      maxWidth,
+      `${leadingIndent}${marker}`,
+      `${leadingIndent}${marker}`,
+    );
+  }
+
+  const codeAndCommentMatch = line.match(/^(.*?)(\s+\/\/\s*.+)$/);
+  if (codeAndCommentMatch) {
+    const codePart = codeAndCommentMatch[1].trimEnd();
+    const commentPart = codeAndCommentMatch[2].trimStart();
+    const wrappedCode = wrapCodeLikeLine(codePart, maxWidth);
+    const wrappedComment = wrapCodeLikeLine(`${continuationIndent}${commentPart}`, maxWidth);
+    return [...wrappedCode, ...wrappedComment];
+  }
+
+  const openParenIndex = trimmedLine.indexOf('(');
+  const closeParenIndex = trimmedLine.lastIndexOf(')');
+  if (openParenIndex !== -1 && closeParenIndex > openParenIndex && trimmedLine.includes(',')) {
+    const prefix = `${leadingIndent}${trimmedLine.slice(0, openParenIndex + 1).trim()}`;
+    const innerContent = trimmedLine.slice(openParenIndex + 1, closeParenIndex).trim();
+    const suffix = trimmedLine.slice(closeParenIndex).trim();
+    const parameters = innerContent.length
+      ? innerContent.split(',').map((segment) => segment.trim()).filter(Boolean)
+      : [];
+
+    if (parameters.length > 1) {
+      const wrappedLines = [prefix];
+      parameters.forEach((parameter, parameterIndex) => {
+        const suffixComma = parameterIndex < parameters.length - 1 ? ',' : '';
+        const wrappedParameterLines = wrapTextWords(
+          `${parameter}${suffixComma}`,
+          maxWidth,
+          continuationIndent,
+          `${continuationIndent}    `,
+        );
+        wrappedLines.push(...wrappedParameterLines);
+      });
+      wrappedLines.push(`${leadingIndent}${suffix}`);
+      return wrappedLines;
+    }
+  }
+
+  if (trimmedLine.includes(',')) {
+    const segments = trimmedLine.split(',').map((segment) => segment.trim()).filter(Boolean);
+    if (segments.length > 1) {
+      const wrappedLines: string[] = [];
+      let currentLine = `${leadingIndent}${segments[0]}`;
+
+      segments.slice(1).forEach((segment) => {
+        const candidate = `${currentLine}, ${segment}`;
+        if (candidate.length <= maxWidth) {
+          currentLine = candidate;
+          return;
+        }
+
+        wrappedLines.push(`${currentLine},`);
+        currentLine = `${continuationIndent}${segment}`;
+      });
+
+      wrappedLines.push(currentLine);
+      return wrappedLines;
+    }
+  }
+
+  const operatorWrapMatch = trimmedLine.match(/^(.*?)(\s*(?:=>|=|\+|\-|\*|\/|\|\||&&)\s+.*)$/);
+  if (operatorWrapMatch) {
+    const [, leftPart, rightPart] = operatorWrapMatch;
+    const wrappedRight = wrapTextWords(
+      rightPart.trim(),
+      maxWidth,
+      continuationIndent,
+      continuationIndent,
+    );
+    return [`${leadingIndent}${leftPart.trimEnd()}`, ...wrappedRight];
+  }
+
+  return wrapTextWords(trimmedLine, maxWidth, leadingIndent, continuationIndent);
+};
+
+const wrapMarkdownSelection = (
+  textarea: HTMLTextAreaElement | null,
+  currentValue: string,
+  setValue: (nextValue: string) => void,
+  maxWidth = 96,
+) => {
+  if (!textarea) {
+    return;
+  }
+
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const hasSelection = start !== end;
+  const blockStart = hasSelection
+    ? currentValue.lastIndexOf('\n', start - 1) + 1
+    : currentValue.lastIndexOf('\n', start - 1) + 1;
+  const blockEndIndex = hasSelection
+    ? currentValue.indexOf('\n', end)
+    : currentValue.indexOf('\n', start);
+  const blockEnd = blockEndIndex === -1 ? currentValue.length : blockEndIndex;
+  const targetBlock = currentValue.slice(blockStart, blockEnd);
+
+  const wrappedBlock = targetBlock
+    .split('\n')
+    .map((line) => {
+      if (!line.trim().length) {
+        return '';
+      }
+
+      const looksLikeCode =
+        /^\s*```/.test(line) ||
+        /^\s*(public|private|protected|class|if|else|for|while|return|const|let|var|function)\b/.test(line) ||
+        /[;{}()[\]=<>]/.test(line) ||
+        /^\s*(\/\/|#|\*)/.test(line);
+
+      return (looksLikeCode ? wrapCodeLikeLine(line, maxWidth) : wrapTextWords(line, maxWidth)).join('\n');
+    })
+    .join('\n');
+
+  const nextValue = `${currentValue.slice(0, blockStart)}${wrappedBlock}${currentValue.slice(blockEnd)}`;
+  updateTextareaValueWithSelection(
+    textarea,
+    setValue,
+    nextValue,
+    blockStart,
+    blockStart + wrappedBlock.length,
+    textarea.scrollTop,
+  );
+};
+
 const markdownListPattern = /^(\s*)([-*+]|\d+\.)\s+(.*)$/;
 
 const orderedMarkdownListPattern = /^(\s*)(\d+)\.\s+(.*)$/;
@@ -1756,12 +1932,6 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
     }
 
     const content = Array.from(node.childNodes).map(renderInlineNode).join('');
-    const style = node.getAttribute('style')?.toLowerCase() ?? '';
-    const isBold = /font-weight:\s*(bold|[6-9]00)/.test(style);
-    const isItalic = /font-style:\s*italic/.test(style);
-    const isMonospace =
-      /font-family:[^;]*(consolas|courier|monaco|menlo)/.test(style) ||
-      /mso-bidi-font-family:[^;]*(courier|consolas)/.test(style);
     const normalizedContent = content.trim();
 
     switch (node.tagName.toLowerCase()) {
@@ -1782,22 +1952,6 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
       default:
         if (!normalizedContent) {
           return content;
-        }
-
-        if (isMonospace) {
-          return `\`${normalizedContent}\``;
-        }
-
-        if (isBold && isItalic) {
-          return `***${normalizedContent}***`;
-        }
-
-        if (isBold) {
-          return `**${normalizedContent}**`;
-        }
-
-        if (isItalic) {
-          return `*${normalizedContent}*`;
         }
 
         return content;
@@ -6547,6 +6701,17 @@ export const App = () => {
         label: 'Tab',
         onClick: runToolbarAction(() =>
           indentSelectedLines(
+            textareaRef.current,
+            currentValue,
+            setValue,
+          )),
+      },
+      {
+        buttonLabel: 'Ajuste',
+        icon: '<>',
+        label: 'Ajuste de linea',
+        onClick: runToolbarAction(() =>
+          wrapMarkdownSelection(
             textareaRef.current,
             currentValue,
             setValue,

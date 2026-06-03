@@ -434,8 +434,8 @@ function CodeBlock({
         </svg>
         Copiar Codigo
       </button>
-      <pre className="overflow-x-auto bg-slate-950 px-4 py-4 text-sm text-slate-100">
-        <code className={className}>{children}</code>
+      <pre className="overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere] bg-slate-950 px-4 py-4 text-sm text-slate-100">
+        <code className={`block whitespace-pre-wrap [overflow-wrap:anywhere] ${className ?? ''}`}>{children}</code>
       </pre>
     </div>
   );
