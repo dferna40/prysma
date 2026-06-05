@@ -2105,6 +2105,145 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
     }
   });
 
+  const htmlBlockTags = new Set([
+    'address',
+    'article',
+    'aside',
+    'blockquote',
+    'details',
+    'dialog',
+    'div',
+    'dl',
+    'dt',
+    'dd',
+    'fieldset',
+    'figcaption',
+    'figure',
+    'footer',
+    'form',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'header',
+    'hr',
+    'li',
+    'main',
+    'nav',
+    'ol',
+    'p',
+    'pre',
+    'section',
+    'table',
+    'tbody',
+    'thead',
+    'tfoot',
+    'tr',
+    'td',
+    'th',
+    'ul',
+  ]);
+
+  const isBlockLikeElement = (element: HTMLElement) => {
+    const tagName = element.tagName.toLowerCase();
+    if (htmlBlockTags.has(tagName)) {
+      return true;
+    }
+
+    const style = element.getAttribute('style')?.toLowerCase() ?? '';
+    return /display:\s*(block|list-item|flex|grid|table|table-row|table-cell)/.test(style);
+  };
+
+  const hasStructuredChildBlocks = (element: HTMLElement) =>
+    Array.from(element.childNodes).some((child) => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        return false;
+      }
+
+      if (!(child instanceof HTMLElement)) {
+        return false;
+      }
+
+      return child.tagName.toLowerCase() === 'br' || isBlockLikeElement(child);
+    });
+
+  const iconLabelToGlyph = (rawLabel: string) => {
+    const normalizedLabel = rawLabel
+      .toLowerCase()
+      .replace(/[_-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!normalizedLabel || normalizedLabel === 'icon') {
+      return '';
+    }
+
+    if (/[\p{Extended_Pictographic}\p{Emoji_Presentation}]/u.test(rawLabel)) {
+      return rawLabel.trim();
+    }
+
+    const iconMap: Array<[RegExp, string]> = [
+      [/\bwarning|alert|aviso|important|importante\b/, '⚠️'],
+      [/\binfo|information|informaci[oó]n\b/, 'ℹ️'],
+      [/\btip|hint|idea|sugerencia\b/, '💡'],
+      [/\berror|danger|fail|critical|peligro\b/, '❌'],
+      [/\bsuccess|ok|done|check|tick|valid|correcto\b/, '✅'],
+      [/\bdeploy|rocket|launch|despliegue\b/, '🚀'],
+      [/\bpackage|box|artifact|paquete\b/, '📦'],
+      [/\bfolder|directory|carpeta\b/, '📁'],
+      [/\bfile|document|archivo\b/, '📄'],
+      [/\blink|url|enlace\b/, '🔗'],
+      [/\bsearch|find|buscar\b/, '🔎'],
+      [/\bserver|host|servidor\b/, '🖥️'],
+      [/\bcode|terminal|console|shell|script\b/, '💻'],
+      [/\bcopy|clipboard|duplicar\b/, '📋'],
+      [/\bstar|favorite|favourite|favorita?\b/, '⭐'],
+      [/\bcalendar|date|agenda|fecha\b/, '📅'],
+      [/\buser|person|profile|usuario\b/, '👤'],
+      [/\bsecurity|lock|shield|secure|seguridad\b/, '🔒'],
+      [/\bconfig|setting|gear|ajuste|configuraci[oó]n\b/, '⚙️'],
+      [/\bnote|nota\b/, '📝'],
+      [/\bquestion|help|faq|ayuda\b/, '❓'],
+    ];
+
+    for (const [pattern, glyph] of iconMap) {
+      if (pattern.test(normalizedLabel)) {
+        return glyph;
+      }
+    }
+
+    return '';
+  };
+
+  const extractIconLikeText = (element: HTMLElement) => {
+    const candidates = [
+      element.getAttribute('alt'),
+      element.getAttribute('aria-label'),
+      element.getAttribute('title'),
+      element.getAttribute('data-icon'),
+      element.getAttribute('data-emoji'),
+      element.getAttribute('data-icon-name'),
+    ]
+      .map((value) => value?.trim() ?? '')
+      .filter(Boolean);
+
+    for (const candidate of candidates) {
+      const glyph = iconLabelToGlyph(candidate);
+      if (glyph) {
+        return glyph;
+      }
+    }
+
+    const classBasedGlyph = iconLabelToGlyph(element.className || '');
+    if (classBasedGlyph) {
+      return classBasedGlyph;
+    }
+
+    return '';
+  };
+
   const renderInlineNode = (node: Node): string => {
     if (node.nodeType === Node.TEXT_NODE) {
       return node.textContent?.replace(/\s+/g, ' ') ?? '';
@@ -2116,8 +2255,13 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
 
     const content = Array.from(node.childNodes).map(renderInlineNode).join('');
     const normalizedContent = content.trim();
+    const iconLikeText = extractIconLikeText(node);
 
     switch (node.tagName.toLowerCase()) {
+      case 'img':
+        return iconLikeText;
+      case 'svg':
+        return normalizedContent || iconLikeText;
       case 'strong':
       case 'b':
         return normalizedContent ? `**${normalizedContent}**` : '';
@@ -2133,6 +2277,10 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
       case 'br':
         return '\n';
       default:
+        if (!normalizedContent && iconLikeText) {
+          return iconLikeText;
+        }
+
         if (!normalizedContent) {
           return content;
         }
@@ -2169,8 +2317,18 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
       case 'h6':
         return inlineContent ? `###### ${inlineContent}` : '';
       case 'p':
-      case 'div':
         return inlineContent;
+      case 'div': {
+        if (!hasStructuredChildBlocks(node)) {
+          return inlineContent;
+        }
+
+        const childBlocks = Array.from(node.childNodes)
+          .map((child) => renderBlockNode(child, listDepth))
+          .filter(Boolean);
+
+        return childBlocks.length ? childBlocks.join('\n\n') : inlineContent;
+      }
       case 'blockquote':
         return inlineContent
           .split('\n')
@@ -2252,12 +2410,32 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
         return;
       }
 
+      if (child instanceof HTMLElement && isBlockLikeElement(child)) {
+        const blockContent = renderBlockNode(child, listDepth);
+        if (blockContent) {
+          contentParts.push(blockContent);
+        }
+        return;
+      }
+
       contentParts.push(renderInlineNode(child));
     });
 
-    const itemLine = `${indent}${marker} ${cleanMarkdownSpacing(contentParts.join(''))}`.trimEnd();
+    const normalizedContent = cleanMarkdownSpacing(contentParts.join('\n'));
+    const contentLines = normalizedContent
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line, index, lines) => line.trim() || index < lines.length - 1);
+    const [firstLine = '', ...continuationLines] = contentLines;
+    const itemLine = `${indent}${marker} ${firstLine.trim()}`.trimEnd();
+    const formattedContinuationLines = continuationLines
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => `${indent}    ${line}`);
 
-    return [itemLine, ...nestedBlocks].filter(Boolean).join('\n');
+    return [itemLine, ...formattedContinuationLines, ...nestedBlocks]
+      .filter(Boolean)
+      .join('\n');
   };
 
   const bodyContent = Array.from(document.body.childNodes)
