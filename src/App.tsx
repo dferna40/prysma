@@ -2072,7 +2072,7 @@ const normalizePastedMarkdownText = (value: string) =>
     .replace(/(^|[\s(])([`´]{1,3})(?=[A-Za-zÁ-ÿ0-9_])/g, '$1')
     .replace(/(?<=[A-Za-zÁ-ÿ0-9_])([`´]{1,3})(?=$|[\s).,;:!?])/g, '')
     .replace(/^\t+/gm, (tabs) => '    '.repeat(tabs.length))
-    .replace(/^([ \t]*)([•◦▪▫●○◉‣⁃▪︎])\s+/gm, '$1- ')
+    .replace(/^([ \t]*)([•◦▪▫●○◉‣⁃▪︎🔹🔸🔷🔶🔺🔻🔵🟢🟡🟣◼◻◆◇❖✦✧➤▶▸▹►])\s+/gm, '$1- ')
     .replace(/^([ \t]*)(\d+)[\)\.]?\s+/gm, '$1$2. ')
     .replace(/[ \t]+\n/g, '\n');
 
@@ -2158,6 +2158,18 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
 
     const style = element.getAttribute('style')?.toLowerCase() ?? '';
     return /display:\s*(block|list-item|flex|grid|table|table-row|table-cell)/.test(style);
+  };
+
+  const bulletLikePrefixPattern =
+    /^[\s\u00a0]*([•◦▪▫●○◉‣⁃▪︎🔹🔸🔷🔶🔺🔻🔵🟢🟡🟣◼◻◆◇❖✦✧➤▶▸▹►]+)/u;
+
+  const extractBulletLikeHeadingContent = (value: string) => {
+    const match = value.match(bulletLikePrefixPattern);
+    if (!match) {
+      return '';
+    }
+
+    return value.slice(match[0].length).trim();
   };
 
   const hasStructuredChildBlocks = (element: HTMLElement) =>
@@ -2311,15 +2323,34 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
       case 'h1':
         return inlineContent ? `# ${inlineContent}` : '';
       case 'h2':
-        return inlineContent ? `## ${inlineContent}` : '';
       case 'h3':
-        return inlineContent ? `### ${inlineContent}` : '';
       case 'h4':
-        return inlineContent ? `#### ${inlineContent}` : '';
       case 'h5':
-        return inlineContent ? `##### ${inlineContent}` : '';
       case 'h6':
+      {
+        const bulletLikeContent = extractBulletLikeHeadingContent(inlineContent);
+        if (bulletLikeContent) {
+          return `- ${bulletLikeContent}`;
+        }
+
+        if (tagName === 'h2') {
+          return inlineContent ? `## ${inlineContent}` : '';
+        }
+
+        if (tagName === 'h3') {
+          return inlineContent ? `### ${inlineContent}` : '';
+        }
+
+        if (tagName === 'h4') {
+          return inlineContent ? `#### ${inlineContent}` : '';
+        }
+
+        if (tagName === 'h5') {
+          return inlineContent ? `##### ${inlineContent}` : '';
+        }
+
         return inlineContent ? `###### ${inlineContent}` : '';
+      }
       case 'p':
         return inlineContent;
       case 'div': {
