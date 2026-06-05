@@ -854,6 +854,13 @@ const splitLines = (value: string) =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+const normalizeEditorStoredContent = (value: string) =>
+  value
+    .replace(/\r\n/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    // Preserve ZWJ/ZWNJ sequences used by compound emoji and icon glyphs.
+    .replace(/[\u200b\uFEFF]/g, '');
+
 const normalizeTags = (value: string) =>
   Array.from(
     new Set(
@@ -2060,10 +2067,7 @@ const handleMarkdownEditorKeyDown = (
 };
 
 const normalizePastedMarkdownText = (value: string) =>
-  value
-    .replace(/\r\n/g, '\n')
-    .replace(/\u00a0/g, ' ')
-    .replace(/[\u200b-\u200d\uFEFF]/g, '')
+  normalizeEditorStoredContent(value)
     .replace(/([`´]{1,3})([A-Za-zÁ-ÿ0-9_./\\:-]+)\1/g, '$2')
     .replace(/(^|[\s(])([`´]{1,3})(?=[A-Za-zÁ-ÿ0-9_])/g, '$1')
     .replace(/(?<=[A-Za-zÁ-ÿ0-9_])([`´]{1,3})(?=$|[\s).,;:!?])/g, '')
@@ -2458,10 +2462,7 @@ const getIndentLevel = (value: string) => {
 const stripLeadingWhitespace = (value: string) => value.replace(/^\s+/, '');
 
 const normalizePdfRichText = (value: string) =>
-  value
-    .replace(/\r\n/g, '\n')
-    .replace(/\u00a0/g, ' ')
-    .replace(/[\u200b-\u200d\uFEFF]/g, '')
+  normalizeEditorStoredContent(value)
     .replace(/[ \t]+\n/g, '\n')
     .trim();
 
@@ -5815,7 +5816,8 @@ export const App = () => {
   const handleEntrySave = () => {
     const trimmedCategory = entryForm.categoria.trim();
     const trimmedTitle = entryForm.titulo.trim();
-    const trimmedContent = entryForm.contenido.trim();
+    const normalizedStoredContent = normalizeEditorStoredContent(entryForm.contenido);
+    const trimmedContent = normalizedStoredContent.trim();
 
     if (!trimmedCategory || !trimmedTitle || !trimmedContent) {
       setFormError(
@@ -5882,7 +5884,7 @@ export const App = () => {
             value: command.value,
           }))
           .filter((command) => command.label.length > 0),
-        contenido: trimmedContent,
+        contenido: normalizedStoredContent,
         id: nextId,
         pasos: splitLines(entryForm.pasos),
         tags:
@@ -5896,7 +5898,7 @@ export const App = () => {
                     value: command.value,
                   }))
                   .filter((command) => command.label.length > 0),
-                contenido: trimmedContent,
+                contenido: normalizedStoredContent,
                 pasos: splitLines(entryForm.pasos),
                 titulo: trimmedTitle,
               }),
@@ -5988,7 +5990,8 @@ export const App = () => {
     }
 
     const trimmedName = templateForm.name.trim();
-    const trimmedContent = templateForm.contenido.trim();
+    const normalizedStoredContent = normalizeEditorStoredContent(templateForm.contenido);
+    const trimmedContent = normalizedStoredContent.trim();
 
     if (!trimmedName || !trimmedContent) {
       setFormError(
@@ -6081,7 +6084,7 @@ export const App = () => {
             value: command.value,
           }))
           .filter((command) => command.label.length > 0),
-        contenido: trimmedContent,
+        contenido: normalizedStoredContent,
         id: nextId,
         isFavorite: originalTemplate?.isFavorite ?? false,
         name: trimmedName,
