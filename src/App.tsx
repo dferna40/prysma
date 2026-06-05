@@ -2163,6 +2163,18 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
   const bulletLikePrefixPattern =
     /^[\s\u00a0]*([•◦▪▫●○◉‣⁃▪︎🔹🔸🔷🔶🔺🔻🔵🟢🟡🟣◼◻◆◇❖✦✧➤▶▸▹►]+)/u;
 
+  const listLikeMarkdownBlockPattern = /^\s*(?:[-*]|\d+\.)\s+/;
+
+  const getBlockIndentPrefix = (element: HTMLElement, fallbackLevel = 0) => {
+    const explicitIndentLevel = Number.parseInt(element.dataset.indentLevel ?? '', 10);
+    const resolvedLevel =
+      Number.isFinite(explicitIndentLevel) && explicitIndentLevel > fallbackLevel
+        ? explicitIndentLevel
+        : fallbackLevel;
+
+    return '    '.repeat(Math.max(0, resolvedLevel));
+  };
+
   const extractBulletLikeHeadingContent = (value: string) => {
     const match = value.match(bulletLikePrefixPattern);
     if (!match) {
@@ -2171,6 +2183,39 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
 
     return value.slice(match[0].length).trim();
   };
+
+  const indentMarkdownBlock = (value: string, indentPrefix: string) => {
+    if (!indentPrefix || !value.trim()) {
+      return value;
+    }
+
+    return value
+      .split('\n')
+      .map((line) => (line.trim() ? `${indentPrefix}${line}` : line))
+      .join('\n');
+  };
+
+  const isListLikeMarkdownBlock = (value: string) =>
+    listLikeMarkdownBlockPattern.test(value.trimStart());
+
+  const joinMarkdownChildBlocks = (blocks: string[]) =>
+    blocks.reduce((accumulator, block) => {
+      if (!block) {
+        return accumulator;
+      }
+
+      if (!accumulator.length) {
+        return block;
+      }
+
+      const previousBlock = accumulator[accumulator.length - 1] ?? '';
+      const joinWithSingleLine =
+        (isListLikeMarkdownBlock(previousBlock) && isListLikeMarkdownBlock(block)) ||
+        (isListLikeMarkdownBlock(previousBlock) && /^\s{4,}\S/.test(block)) ||
+        (/:\s*$/.test(previousBlock.trim()) && /^\s{4,}\S/.test(block));
+
+      return `${accumulator}${joinWithSingleLine ? '\n' : '\n\n'}${block}`;
+    }, '');
 
   const hasStructuredChildBlocks = (element: HTMLElement) =>
     Array.from(element.childNodes).some((child) => {
@@ -2329,8 +2374,9 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
       case 'h6':
       {
         const bulletLikeContent = extractBulletLikeHeadingContent(inlineContent);
+        const indentPrefix = getBlockIndentPrefix(node, Math.max(0, listDepth - 1));
         if (bulletLikeContent) {
-          return `- ${bulletLikeContent}`;
+          return `${indentPrefix}- ${bulletLikeContent}`;
         }
 
         if (tagName === 'h2') {
@@ -2351,18 +2397,33 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
 
         return inlineContent ? `###### ${inlineContent}` : '';
       }
-      case 'p':
-        return inlineContent;
+      case 'p': {
+        const bulletLikeContent = extractBulletLikeHeadingContent(inlineContent);
+        const indentPrefix = getBlockIndentPrefix(node, listDepth);
+        if (bulletLikeContent) {
+          return `${indentPrefix}- ${bulletLikeContent}`;
+        }
+
+        return indentMarkdownBlock(inlineContent, indentPrefix);
+      }
       case 'div': {
+        const indentPrefix = getBlockIndentPrefix(node, listDepth);
+        const bulletLikeContent = extractBulletLikeHeadingContent(inlineContent);
+        if (bulletLikeContent && !hasStructuredChildBlocks(node)) {
+          return `${indentPrefix}- ${bulletLikeContent}`;
+        }
+
         if (!hasStructuredChildBlocks(node)) {
-          return inlineContent;
+          return indentMarkdownBlock(inlineContent, indentPrefix);
         }
 
         const childBlocks = Array.from(node.childNodes)
           .map((child) => renderBlockNode(child, listDepth))
           .filter(Boolean);
 
-        return childBlocks.length ? childBlocks.join('\n\n') : inlineContent;
+        return childBlocks.length
+          ? joinMarkdownChildBlocks(childBlocks)
+          : indentMarkdownBlock(inlineContent, indentPrefix);
       }
       case 'blockquote':
         return inlineContent
@@ -2414,7 +2475,7 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
           .map((child) => renderBlockNode(child, listDepth))
           .filter(Boolean);
 
-        return childBlocks.length ? childBlocks.join('\n\n') : inlineContent;
+        return childBlocks.length ? joinMarkdownChildBlocks(childBlocks) : inlineContent;
       }
     }
   };
