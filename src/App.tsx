@@ -1262,11 +1262,79 @@ const updateTextareaValueWithSelection = (
   }
 
   const nextScrollTop = scrollTop ?? textarea.scrollTop;
+  const keepSelectionVisible = () => {
+    const computedStyle = window.getComputedStyle(textarea);
+    const mirror = document.createElement('div');
+    const mirrorProperties = [
+      'boxSizing',
+      'width',
+      'paddingTop',
+      'paddingRight',
+      'paddingBottom',
+      'paddingLeft',
+      'borderTopWidth',
+      'borderRightWidth',
+      'borderBottomWidth',
+      'borderLeftWidth',
+      'fontFamily',
+      'fontSize',
+      'fontStyle',
+      'fontWeight',
+      'letterSpacing',
+      'lineHeight',
+      'textTransform',
+      'textIndent',
+      'whiteSpace',
+      'wordBreak',
+      'overflowWrap',
+      'tabSize',
+    ] as const;
+
+    mirror.style.position = 'absolute';
+    mirror.style.visibility = 'hidden';
+    mirror.style.pointerEvents = 'none';
+    mirror.style.left = '-100000px';
+    mirror.style.top = '0';
+    mirror.style.whiteSpace = 'pre-wrap';
+    mirror.style.wordBreak = 'break-word';
+    mirror.style.overflowWrap = 'anywhere';
+
+    mirrorProperties.forEach((property) => {
+      mirror.style[property] = computedStyle[property];
+    });
+
+    mirror.style.width = `${textarea.clientWidth}px`;
+    mirror.textContent = textarea.value.slice(0, selectionEnd);
+
+    const caretMarker = document.createElement('span');
+    caretMarker.textContent = textarea.value.slice(selectionEnd, selectionEnd + 1) || ' ';
+    mirror.appendChild(caretMarker);
+    document.body.appendChild(mirror);
+
+    const caretTop = caretMarker.offsetTop;
+    const caretHeight = caretMarker.offsetHeight || Number.parseFloat(computedStyle.lineHeight) || 24;
+    document.body.removeChild(mirror);
+
+    const viewportTop = textarea.scrollTop;
+    const viewportBottom = viewportTop + textarea.clientHeight;
+    const caretBottom = caretTop + caretHeight;
+    const padding = Math.max(18, caretHeight * 1.25);
+
+    if (caretBottom > viewportBottom - padding) {
+      textarea.scrollTop = Math.max(0, caretBottom - textarea.clientHeight + padding);
+      return;
+    }
+
+    if (caretTop < viewportTop + padding) {
+      textarea.scrollTop = Math.max(0, caretTop - padding);
+    }
+  };
 
   requestAnimationFrame(() => {
     textarea.focus();
     textarea.setSelectionRange(selectionStart, selectionEnd);
     textarea.scrollTop = nextScrollTop;
+    keepSelectionVisible();
   });
 };
 
@@ -1343,6 +1411,118 @@ const prefixCurrentOrSelectedLines = (
     nextValue,
     start + firstPrefixLength,
     end + totalAddedCharacters,
+  );
+};
+
+const findPreviousOrderedListNumber = (
+  value: string,
+  fromIndex: number,
+  indentLevel: number,
+) => {
+  const previousLines = value
+    .slice(0, Math.max(0, fromIndex))
+    .split('\n')
+    .reverse();
+
+  for (const line of previousLines) {
+    const orderedMatch = line.match(orderedMarkdownListPattern);
+    if (!orderedMatch) {
+      if (!line.trim()) {
+        continue;
+      }
+
+      const currentIndentLevel = getIndentLevel(line);
+      if (currentIndentLevel < indentLevel) {
+        break;
+      }
+      continue;
+    }
+
+    const [, indentation, number] = orderedMatch;
+    if (getIndentLevel(indentation) !== indentLevel) {
+      continue;
+    }
+
+    return Number.parseInt(number, 10) + 1;
+  }
+
+  return 1;
+};
+
+const prefixNumberedLinesContinuing = (
+  textarea: HTMLTextAreaElement | null,
+  currentValue: string,
+  setValue: (nextValue: string) => void,
+) => {
+  if (!textarea) {
+    return;
+  }
+
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const hasSelection = start !== end;
+  const lineStart = currentValue.lastIndexOf('\n', start - 1) + 1;
+  const lineEnd = currentValue.indexOf('\n', end);
+  const safeLineEnd = lineEnd === -1 ? currentValue.length : lineEnd;
+  const selectedBlock = currentValue.slice(lineStart, safeLineEnd);
+  const currentLine = currentValue.slice(lineStart, safeLineEnd);
+  const baseIndentation = currentLine.match(/^\s*/)?.[0] ?? '';
+  const indentLevel = getIndentLevel(baseIndentation);
+  const startingNumber = findPreviousOrderedListNumber(currentValue, lineStart, indentLevel);
+
+  if (!hasSelection) {
+    const normalizedCurrentLine = currentLine.replace(orderedMarkdownListPattern, '$1$3');
+    const prefixedLine = `${baseIndentation}${startingNumber}. ${normalizedCurrentLine.trimStart()}`;
+    const nextValue = `${currentValue.slice(0, lineStart)}${prefixedLine}${currentValue.slice(safeLineEnd)}`;
+    const cursorOffset = start - lineStart;
+    const nextCursorPosition =
+      lineStart + `${baseIndentation}${startingNumber}. `.length + Math.max(0, cursorOffset - baseIndentation.length);
+
+    updateTextareaValueWithSelection(
+      textarea,
+      setValue,
+      nextValue,
+      nextCursorPosition,
+      nextCursorPosition,
+    );
+    return;
+  }
+
+  const lines = selectedBlock.split('\n');
+  const counters = new Map<number, number>();
+  const prefixedBlock = lines
+    .map((line) => {
+      if (!line.trim().length) {
+        return line;
+      }
+
+      const lineIndentation = line.match(/^\s*/)?.[0] ?? '';
+      const lineIndentLevel = getIndentLevel(lineIndentation);
+      const normalizedLine = line.replace(orderedMarkdownListPattern, '$1$3').trimStart();
+
+      Array.from(counters.keys()).forEach((level) => {
+        if (level > lineIndentLevel) {
+          counters.delete(level);
+        }
+      });
+
+      const nextNumber = counters.has(lineIndentLevel)
+        ? (counters.get(lineIndentLevel) ?? 1) + 1
+        : findPreviousOrderedListNumber(currentValue, lineStart, lineIndentLevel);
+
+      counters.set(lineIndentLevel, nextNumber);
+
+      return `${lineIndentation}${nextNumber}. ${normalizedLine}`;
+    })
+    .join('\n');
+  const nextValue = `${currentValue.slice(0, lineStart)}${prefixedBlock}${currentValue.slice(safeLineEnd)}`;
+
+  updateTextareaValueWithSelection(
+    textarea,
+    setValue,
+    nextValue,
+    lineStart,
+    lineStart + prefixedBlock.length,
   );
 };
 
@@ -1769,7 +1949,7 @@ const handleMarkdownEditorKeyDown = (
 
     if (event.shiftKey && normalizedKey === '7') {
       event.preventDefault();
-      prefixCurrentOrSelectedLines(textarea, currentValue, setValue, (lineIndex) => `${lineIndex + 1}. `);
+      prefixNumberedLinesContinuing(textarea, currentValue, setValue);
       return;
     }
 
@@ -1884,6 +2064,9 @@ const normalizePastedMarkdownText = (value: string) =>
     .replace(/\r\n/g, '\n')
     .replace(/\u00a0/g, ' ')
     .replace(/[\u200b-\u200d\uFEFF]/g, '')
+    .replace(/([`´]{1,3})([A-Za-zÁ-ÿ0-9_./\\:-]+)\1/g, '$2')
+    .replace(/(^|[\s(])([`´]{1,3})(?=[A-Za-zÁ-ÿ0-9_])/g, '$1')
+    .replace(/(?<=[A-Za-zÁ-ÿ0-9_])([`´]{1,3})(?=$|[\s).,;:!?])/g, '')
     .replace(/^\t+/gm, (tabs) => '    '.repeat(tabs.length))
     .replace(/^([ \t]*)([•◦▪▫●○◉‣⁃▪︎])\s+/gm, '$1- ')
     .replace(/^([ \t]*)(\d+)[\)\.]?\s+/gm, '$1$2. ')
@@ -1942,7 +2125,7 @@ const convertHtmlClipboardToMarkdown = (html: string) => {
       case 'i':
         return normalizedContent ? `*${normalizedContent}*` : '';
       case 'code':
-        return normalizedContent ? `\`${normalizedContent}\`` : '';
+        return normalizedContent;
       case 'a': {
         const href = node.getAttribute('href')?.trim() ?? '';
         return href ? `[${normalizedContent || href}](${href})` : content;
@@ -6688,11 +6871,10 @@ export const App = () => {
         label: 'Numerada',
         shortcut: 'Ctrl+Shift+7',
         onClick: runToolbarAction(() =>
-          prefixCurrentOrSelectedLines(
+          prefixNumberedLinesContinuing(
             textareaRef.current,
             currentValue,
             setValue,
-            (lineIndex) => `${lineIndex + 1}. `,
           )),
       },
       {
@@ -6712,6 +6894,17 @@ export const App = () => {
         label: 'Ajuste de linea',
         onClick: runToolbarAction(() =>
           wrapMarkdownSelection(
+            textareaRef.current,
+            currentValue,
+            setValue,
+          )),
+      },
+      {
+        buttonLabel: 'Menos tab',
+        icon: '<<',
+        label: 'Disminuir sangria',
+        onClick: runToolbarAction(() =>
+          outdentSelectedLines(
             textareaRef.current,
             currentValue,
             setValue,
