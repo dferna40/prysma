@@ -27,12 +27,21 @@ const buildEntrySearchBlob = (entry: KnowledgeEntry) =>
     .join(' ')
     .toLowerCase();
 
+interface EntrySearchIndex {
+  category: string;
+  entry: KnowledgeEntry;
+  hasCommands: boolean;
+  hasSteps: boolean;
+  normalizedTags: string[];
+  searchBlob: string;
+}
+
 const matchesPrefixQuery = (
-  entry: KnowledgeEntry,
+  entryIndex: EntrySearchIndex,
   query: string,
-  predicate: (entry: KnowledgeEntry) => boolean,
+  predicate: (entryIndex: EntrySearchIndex) => boolean,
 ) => {
-  if (!predicate(entry)) {
+  if (!predicate(entryIndex)) {
     return false;
   }
 
@@ -40,7 +49,7 @@ const matchesPrefixQuery = (
     return true;
   }
 
-  return buildEntrySearchBlob(entry).includes(query);
+  return entryIndex.searchBlob.includes(query);
 };
 
 export function useSearch(
@@ -49,100 +58,129 @@ export function useSearch(
   activeCategoryFilter?: string,
   activeTagFilters: string[] = [],
 ) {
+  const entrySearchIndexes = useMemo<EntrySearchIndex[]>(
+    () =>
+      entries.map((entry) => ({
+        category: normalize(entry.categoria),
+        entry,
+        hasCommands: Boolean(entry.comandos?.length),
+        hasSteps: Boolean(entry.pasos?.length),
+        normalizedTags: entry.tags.map((tag) => normalize(tag)).filter(Boolean),
+        searchBlob: buildEntrySearchBlob(entry),
+      })),
+    [entries],
+  );
+
   return useMemo(() => {
     const term = normalize(rawSearchTerm);
     const normalizedCategoryFilter = normalize(activeCategoryFilter ?? '');
     const normalizedTagFilters = activeTagFilters
       .map((tag) => normalize(tag))
       .filter(Boolean);
-    let filteredEntries = entries;
+    let filteredEntryIndexes = entrySearchIndexes;
 
     if (normalizedCategoryFilter) {
-      filteredEntries = filteredEntries.filter(
-        (entry) => normalize(entry.categoria) === normalizedCategoryFilter,
+      filteredEntryIndexes = filteredEntryIndexes.filter(
+        (entryIndex) => entryIndex.category === normalizedCategoryFilter,
       );
     }
 
     if (normalizedTagFilters.length) {
-      filteredEntries = filteredEntries.filter((entry) =>
+      filteredEntryIndexes = filteredEntryIndexes.filter((entryIndex) =>
         normalizedTagFilters.every((activeTag) =>
-          entry.tags.some((tag) => normalize(tag) === activeTag),
+          entryIndex.normalizedTags.includes(activeTag),
         ),
       );
     }
 
     if (!term) {
-      return filteredEntries;
+      return filteredEntryIndexes.map((entryIndex) => entryIndex.entry);
     }
 
     if (term.startsWith('/cmd')) {
       const cmdQuery = normalize(term.replace('/cmd', ''));
 
-      return filteredEntries.filter((entry) =>
+      return filteredEntryIndexes
+        .filter((entryIndex) =>
         matchesPrefixQuery(
-          entry,
+          entryIndex,
           cmdQuery,
-          (candidateEntry) =>
-            (candidateEntry.categoria === 'Batch' ||
-              candidateEntry.categoria === 'General') &&
-            Boolean(candidateEntry.comandos?.length),
+          (candidateEntryIndex) =>
+            (candidateEntryIndex.entry.categoria === 'Batch' ||
+              candidateEntryIndex.entry.categoria === 'General') &&
+            candidateEntryIndex.hasCommands,
         ),
-      );
+        )
+        .map((entryIndex) => entryIndex.entry);
     }
 
     if (term.startsWith('/env')) {
       const envQuery = normalize(term.replace('/env', ''));
 
-      return filteredEntries.filter((entry) =>
-        matchesPrefixQuery(entry, envQuery, (candidateEntry) => candidateEntry.categoria === 'Entorno'),
-      );
+      return filteredEntryIndexes
+        .filter((entryIndex) =>
+          matchesPrefixQuery(
+            entryIndex,
+            envQuery,
+            (candidateEntryIndex) => candidateEntryIndex.entry.categoria === 'Entorno',
+          ),
+        )
+        .map((entryIndex) => entryIndex.entry);
     }
 
     if (term.startsWith('/db')) {
       const dbQuery = normalize(term.replace('/db', ''));
 
-      return filteredEntries.filter((entry) =>
+      return filteredEntryIndexes
+        .filter((entryIndex) =>
         matchesPrefixQuery(
-          entry,
+          entryIndex,
           dbQuery,
-          (candidateEntry) =>
-            candidateEntry.categoria === 'Batch' ||
-            candidateEntry.comandos?.some((command) =>
+          (candidateEntryIndex) =>
+            candidateEntryIndex.entry.categoria === 'Batch' ||
+            candidateEntryIndex.entry.comandos?.some((command) =>
               /sql|oracle|tabla|query|select|insert|update|delete/i.test(
                 `${command.label} ${command.value}`,
               ),
             ) === true ||
-            /sql|oracle|tabla|bbdd|base de datos|query/i.test(
-              buildEntrySearchBlob(candidateEntry),
-            ),
+            /sql|oracle|tabla|bbdd|base de datos|query/i.test(candidateEntryIndex.searchBlob),
         ),
-      );
+        )
+        .map((entryIndex) => entryIndex.entry);
     }
 
     if (term.startsWith('/uml')) {
       const umlQuery = normalize(term.replace('/uml', ''));
 
-      return filteredEntries.filter((entry) =>
-        matchesPrefixQuery(entry, umlQuery, (candidateEntry) => candidateEntry.categoria === 'UML'),
-      );
+      return filteredEntryIndexes
+        .filter((entryIndex) =>
+          matchesPrefixQuery(
+            entryIndex,
+            umlQuery,
+            (candidateEntryIndex) => candidateEntryIndex.entry.categoria === 'UML',
+          ),
+        )
+        .map((entryIndex) => entryIndex.entry);
     }
 
     if (term.startsWith('/task')) {
       const taskQuery = normalize(term.replace('/task', ''));
 
-      return filteredEntries.filter((entry) =>
+      return filteredEntryIndexes
+        .filter((entryIndex) =>
         matchesPrefixQuery(
-          entry,
+          entryIndex,
           taskQuery,
-          (candidateEntry) =>
-            Boolean(candidateEntry.pasos?.length) ||
-            /\bpaso\b|\btarea\b|\bprocedimiento\b|\bchecklist\b/i.test(
-              buildEntrySearchBlob(candidateEntry),
-            ),
+          (candidateEntryIndex) =>
+            candidateEntryIndex.hasSteps ||
+            /\bpaso\b|\btarea\b|\bprocedimiento\b|\bchecklist\b/i.test(candidateEntryIndex.searchBlob),
         ),
-      );
+        )
+        .map((entryIndex) => entryIndex.entry);
     }
 
-    return filteredEntries.filter((entry) => buildEntrySearchBlob(entry).includes(term));
-  }, [activeCategoryFilter, activeTagFilters, entries, rawSearchTerm]);
+    return filteredEntryIndexes
+      .filter((entryIndex) => entryIndex.searchBlob.includes(term))
+      .map((entryIndex) => entryIndex.entry);
+  }, [activeCategoryFilter, activeTagFilters, entrySearchIndexes, rawSearchTerm]);
 }
