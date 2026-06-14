@@ -5257,11 +5257,12 @@ export const App = () => {
       };
 
       const writeListBlock = async (items: PdfListItem[]) => {
-        const markerWidth = 12;
         const itemGap = 2.5;
         const indentWidth = 8;
 
         for (const item of items) {
+          const isOrderedMarker = /^\d+\.$/.test(item.marker);
+          const markerWidth = isOrderedMarker ? 10 : 5;
           const itemX = margin + item.indentLevel * indentWidth;
           const textX = itemX + markerWidth;
           const textWidth = Math.max(24, pageWidth - margin - textX);
