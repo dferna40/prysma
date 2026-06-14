@@ -67,6 +67,7 @@ const buildBlockStoragePaths = (baseDirectory) => {
 
   return {
     categoriesFilePath: path.join(runtimeDataDirectory, 'categories.json'),
+    deletedCategoriesFilePath: path.join(runtimeDataDirectory, 'deleted-categories.json'),
     entriesDirectory,
     runtimeDataDirectory,
     settingsFilePath: path.join(runtimeDataDirectory, 'settings.json'),
@@ -123,6 +124,7 @@ const readJsonFile = async (filePath) => {
 
 const hasBlockStorage = (runtimePaths) =>
   fs.existsSync(runtimePaths.categoriesFilePath) &&
+  fs.existsSync(runtimePaths.deletedCategoriesFilePath) &&
   fs.existsSync(runtimePaths.settingsFilePath) &&
   fs.existsSync(runtimePaths.templatesFilePath) &&
   fs.existsSync(runtimePaths.trashFilePath) &&
@@ -158,6 +160,10 @@ const writeBlockManualData = async (
 
   await Promise.all([
     writeJsonFile(runtimePaths.categoriesFilePath, manualData.categories ?? []),
+    writeJsonFile(
+      runtimePaths.deletedCategoriesFilePath,
+      manualData.deletedCategories ?? [],
+    ),
     writeJsonFile(runtimePaths.settingsFilePath, manualData.settings ?? {}),
     writeJsonFile(runtimePaths.templatesFilePath, manualData.templates ?? []),
     writeJsonFile(runtimePaths.trashFilePath, manualData.trash ?? []),
@@ -197,6 +203,74 @@ const writeBlockManualData = async (
   }
 };
 
+const writeEntryChunks = async (
+  runtimePaths,
+  entryChunks = {},
+  removedEntryChunkKeys = [],
+) => {
+  await fs.promises.mkdir(runtimePaths.entriesDirectory, { recursive: true });
+
+  for (const [storageKey, categoryEntries] of Object.entries(entryChunks)) {
+    const entryFilePath = path.join(runtimePaths.entriesDirectory, `${storageKey}.json`);
+    await writeJsonFile(entryFilePath, Array.isArray(categoryEntries) ? categoryEntries : []);
+  }
+
+  for (const storageKey of removedEntryChunkKeys) {
+    const entryFilePath = path.join(runtimePaths.entriesDirectory, `${storageKey}.json`);
+    if (fs.existsSync(entryFilePath)) {
+      await fs.promises.unlink(entryFilePath);
+    }
+  }
+};
+
+const applyManualPatch = (currentManualData, manualPatch) => {
+  const nextManualData = {
+    ...currentManualData,
+    categories: Array.isArray(manualPatch.categories)
+      ? manualPatch.categories
+      : currentManualData.categories,
+    deletedCategories: Array.isArray(manualPatch.deletedCategories)
+      ? manualPatch.deletedCategories
+      : currentManualData.deletedCategories ?? [],
+    settings:
+      manualPatch.settings && typeof manualPatch.settings === 'object'
+        ? manualPatch.settings
+        : currentManualData.settings,
+    templates: Array.isArray(manualPatch.templates)
+      ? manualPatch.templates
+      : currentManualData.templates,
+    trash: Array.isArray(manualPatch.trash) ? manualPatch.trash : currentManualData.trash,
+  };
+
+  const currentEntryChunks = groupEntriesByCategory(currentManualData.entries);
+  const nextEntryChunks = new Map(currentEntryChunks);
+  const patchedEntryChunks =
+    manualPatch.entryChunks && typeof manualPatch.entryChunks === 'object'
+      ? manualPatch.entryChunks
+      : {};
+
+  Object.entries(patchedEntryChunks).forEach(([storageKey, categoryEntries]) => {
+    nextEntryChunks.set(storageKey, Array.isArray(categoryEntries) ? categoryEntries : []);
+  });
+
+  const removedEntryChunkKeys = Array.isArray(manualPatch.removedEntryChunkKeys)
+    ? manualPatch.removedEntryChunkKeys.filter((value) => typeof value === 'string')
+    : [];
+
+  removedEntryChunkKeys.forEach((storageKey) => {
+    nextEntryChunks.delete(storageKey);
+  });
+
+  nextManualData.entries = Array.from(nextEntryChunks.values()).flatMap((entryChunk) =>
+    Array.isArray(entryChunk) ? entryChunk : [],
+  );
+
+  return {
+    nextManualData,
+    removedEntryChunkKeys,
+  };
+};
+
 const readLegacyOrBundledManualFile = async (runtimePaths) => {
   const candidateFilePath = fs.existsSync(runtimePaths.legacyManualFilePath)
     ? runtimePaths.legacyManualFilePath
@@ -208,11 +282,13 @@ const readLegacyOrBundledManualFile = async (runtimePaths) => {
 const readBlockManualFile = async (runtimePaths) => {
   const [
     categories,
+    deletedCategories,
     settings,
     templates,
     trash,
   ] = await Promise.all([
     readJsonFile(runtimePaths.categoriesFilePath),
+    readJsonFile(runtimePaths.deletedCategoriesFilePath),
     readJsonFile(runtimePaths.settingsFilePath),
     readJsonFile(runtimePaths.templatesFilePath),
     readJsonFile(runtimePaths.trashFilePath),
@@ -228,7 +304,7 @@ const readBlockManualFile = async (runtimePaths) => {
 
   return {
     categories: Array.isArray(categories) ? categories : [],
-    deletedCategories: [],
+    deletedCategories: Array.isArray(deletedCategories) ? deletedCategories : [],
     entries: entryChunks.flatMap((entryChunk) => (Array.isArray(entryChunk) ? entryChunk : [])),
     settings: settings && typeof settings === 'object' ? settings : {},
     templates: Array.isArray(templates) ? templates : [],
@@ -252,6 +328,7 @@ const listRevisionFiles = async (runtimePaths) => {
 
     return [
       runtimePaths.categoriesFilePath,
+      runtimePaths.deletedCategoriesFilePath,
       runtimePaths.settingsFilePath,
       runtimePaths.templatesFilePath,
       runtimePaths.trashFilePath,
@@ -676,6 +753,142 @@ export const startServer = async ({
       );
       response.status(500).json({
         error: 'No se pudo guardar manual.json en disco.',
+      });
+    }
+  });
+
+  app.post('/save-manual-blocks', async (request, response) => {
+    const requestBody = request.body;
+    const usesEnvelope =
+      requestBody &&
+      typeof requestBody === 'object' &&
+      !Array.isArray(requestBody) &&
+      'data' in requestBody;
+    const manualPatch = usesEnvelope ? requestBody.data : requestBody;
+    const expectedRevision =
+      usesEnvelope && typeof requestBody.expectedRevision === 'string'
+        ? requestBody.expectedRevision
+        : undefined;
+
+    if (!manualPatch || typeof manualPatch !== 'object' || Array.isArray(manualPatch)) {
+      logServerEvent('SAVE-BLOCKS', 'Peticion rechazada: body no valido para guardado por bloques.');
+      response.status(400).json({
+        error: 'El cuerpo de la peticion debe ser un objeto con bloques del manual.',
+      });
+      return;
+    }
+
+    try {
+      if (expectedRevision) {
+        const currentRevision = await getManualRevision(runtimePaths);
+
+        if (currentRevision !== expectedRevision) {
+          logServerEvent('SAVE-BLOCKS', 'Conflicto de revision detectado al guardar por bloques.', {
+            currentRevision,
+            expectedRevision,
+          });
+          response.status(409).json({
+            currentRevision,
+            error: 'save-conflict',
+            message:
+              'El manual ha cambiado en disco desde que esta instancia lo cargo.',
+          });
+          return;
+        }
+      }
+
+      const currentManualSnapshot = await readManualFile(runtimePaths);
+      const { nextManualData, removedEntryChunkKeys } = applyManualPatch(
+        currentManualSnapshot,
+        manualPatch,
+      );
+
+      logServerEvent('SAVE-BLOCKS', 'Inicio de persistencia incremental.', {
+        changedCategories: Array.isArray(manualPatch.categories),
+        changedDeletedCategories: Array.isArray(manualPatch.deletedCategories),
+        changedEntryChunks:
+          manualPatch.entryChunks && typeof manualPatch.entryChunks === 'object'
+            ? Object.keys(manualPatch.entryChunks).length
+            : 0,
+        changedSettings: Boolean(manualPatch.settings),
+        changedTemplates: Array.isArray(manualPatch.templates),
+        changedTrash: Array.isArray(manualPatch.trash),
+        removedEntryChunks: removedEntryChunkKeys.length,
+      });
+
+      const backupTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const backupFilePath = path.join(
+        runtimePaths.backupsDirectory,
+        `manual_${backupTimestamp}.json`,
+      );
+      await writeJsonFile(backupFilePath, currentManualSnapshot);
+
+      await fs.promises.mkdir(runtimePaths.runtimeDataDirectory, { recursive: true });
+
+      const writes = [];
+
+      if (Array.isArray(manualPatch.categories)) {
+        writes.push(
+          writeJsonFile(runtimePaths.categoriesFilePath, nextManualData.categories ?? []),
+        );
+      }
+
+      if (Array.isArray(manualPatch.deletedCategories)) {
+        writes.push(
+          writeJsonFile(
+            runtimePaths.deletedCategoriesFilePath,
+            nextManualData.deletedCategories ?? [],
+          ),
+        );
+      }
+
+      if (manualPatch.settings && typeof manualPatch.settings === 'object') {
+        writes.push(writeJsonFile(runtimePaths.settingsFilePath, nextManualData.settings ?? {}));
+      }
+
+      if (Array.isArray(manualPatch.templates)) {
+        writes.push(
+          writeJsonFile(runtimePaths.templatesFilePath, nextManualData.templates ?? []),
+        );
+      }
+
+      if (Array.isArray(manualPatch.trash)) {
+        writes.push(writeJsonFile(runtimePaths.trashFilePath, nextManualData.trash ?? []));
+      }
+
+      if (
+        (manualPatch.entryChunks && typeof manualPatch.entryChunks === 'object') ||
+        removedEntryChunkKeys.length
+      ) {
+        writes.push(
+          writeEntryChunks(
+            runtimePaths,
+            manualPatch.entryChunks && typeof manualPatch.entryChunks === 'object'
+              ? manualPatch.entryChunks
+              : {},
+            removedEntryChunkKeys,
+          ),
+        );
+      }
+
+      if (runtimePaths.legacyManualFilePath) {
+        writes.push(writeJsonFile(runtimePaths.legacyManualFilePath, nextManualData));
+      }
+
+      await Promise.all(writes);
+      await cleanupOrphanedImages(runtimePaths.imagesDirectory, nextManualData);
+
+      response.status(200).json({
+        ok: true,
+        revision: await getManualRevision(runtimePaths),
+      });
+    } catch (error) {
+      console.error(
+        `[${formatTimestamp()}] [SAVE-BLOCKS] No se pudo guardar el manual por bloques.`,
+        error,
+      );
+      response.status(500).json({
+        error: 'No se pudo guardar el manual por bloques.',
       });
     }
   });

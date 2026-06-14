@@ -46,6 +46,15 @@ import type {
 } from './types';
 
 const STORAGE_KEY = 'knowledge-manual-state-v2';
+const STORAGE_BLOCK_PREFIX = 'knowledge-manual-state-v3';
+const STORAGE_BLOCK_KEYS = {
+  categories: `${STORAGE_BLOCK_PREFIX}:categories`,
+  deletedCategories: `${STORAGE_BLOCK_PREFIX}:deleted-categories`,
+  entriesIndex: `${STORAGE_BLOCK_PREFIX}:entries:index`,
+  settings: `${STORAGE_BLOCK_PREFIX}:settings`,
+  templates: `${STORAGE_BLOCK_PREFIX}:templates`,
+  trash: `${STORAGE_BLOCK_PREFIX}:trash`,
+} as const;
 const LEGACY_COMMAND_STORAGE_KEY = 'result-card-command-overrides';
 const ASSISTANT_VERSION = '1.0.0';
 const HOME_PINNED_ENTRY_PREVIEW_LIMIT = 4;
@@ -182,6 +191,16 @@ interface StoredManualSnapshot {
   source: Exclude<ManualOriginState, 'server'>;
 }
 
+interface ManualDataServerPatch {
+  categories?: CategoryDefinition[];
+  deletedCategories?: CategoryDefinition[];
+  entryChunks?: Record<string, KnowledgeEntry[]>;
+  removedEntryChunkKeys?: string[];
+  settings?: AppSettings;
+  templates?: EntryTemplate[];
+  trash?: KnowledgeEntry[];
+}
+
 interface UndoSnapshot {
   manualData: ManualData;
 }
@@ -260,6 +279,20 @@ const normalizeCustomEntryOrderByCategory = (
     return accumulator;
   }, {});
 };
+
+const normalizeClientStorageKey = (value: string) =>
+  value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-')
+    .toLowerCase();
+
+const getEntryChunkStorageKey = (categoryName: string) =>
+  `${STORAGE_BLOCK_PREFIX}:entries:${
+    normalizeClientStorageKey(categoryName) || 'sin-categoria'
+  }`;
 
 type AdmonitionBlockKind =
   | 'error'
@@ -616,6 +649,56 @@ const extractManualImportSource = (source: unknown) => {
   return source;
 };
 
+const readBlockManualSnapshotFromLocalStorage = (): ManualData | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+
+  const rawEntriesIndex = window.localStorage.getItem(STORAGE_BLOCK_KEYS.entriesIndex);
+  const rawCategories = window.localStorage.getItem(STORAGE_BLOCK_KEYS.categories);
+  const rawSettings = window.localStorage.getItem(STORAGE_BLOCK_KEYS.settings);
+  const rawTemplates = window.localStorage.getItem(STORAGE_BLOCK_KEYS.templates);
+  const rawTrash = window.localStorage.getItem(STORAGE_BLOCK_KEYS.trash);
+  const rawDeletedCategories = window.localStorage.getItem(
+    STORAGE_BLOCK_KEYS.deletedCategories,
+  );
+
+  if (
+    !rawEntriesIndex &&
+    !rawCategories &&
+    !rawSettings &&
+    !rawTemplates &&
+    !rawTrash &&
+    !rawDeletedCategories
+  ) {
+    return null;
+  }
+
+  const parsedEntriesIndex = rawEntriesIndex ? JSON.parse(rawEntriesIndex) : [];
+  const entryChunkKeys = Array.isArray(parsedEntriesIndex)
+    ? parsedEntriesIndex.filter((value): value is string => typeof value === 'string')
+    : [];
+
+  const entryChunks = entryChunkKeys.flatMap((storageKey) => {
+    const rawChunk = window.localStorage.getItem(storageKey);
+    if (!rawChunk) {
+      return [];
+    }
+
+    const parsedChunk = JSON.parse(rawChunk);
+    return Array.isArray(parsedChunk) ? parsedChunk : [];
+  });
+
+  return normalizeManualData({
+    categories: rawCategories ? JSON.parse(rawCategories) : [],
+    deletedCategories: rawDeletedCategories ? JSON.parse(rawDeletedCategories) : [],
+    entries: entryChunks,
+    settings: rawSettings ? JSON.parse(rawSettings) : defaultSettings,
+    templates: rawTemplates ? JSON.parse(rawTemplates) : [],
+    trash: rawTrash ? JSON.parse(rawTrash) : [],
+  });
+};
+
 const readStoredManualSnapshot = (): StoredManualSnapshot => {
   const baseManual = normalizeManualData(manualEntries);
 
@@ -627,6 +710,14 @@ const readStoredManualSnapshot = (): StoredManualSnapshot => {
   }
 
   try {
+    const blockManual = readBlockManualSnapshotFromLocalStorage();
+    if (blockManual) {
+      return {
+        manualData: blockManual,
+        source: 'local-storage',
+      };
+    }
+
     const rawManual = window.localStorage.getItem(STORAGE_KEY);
     if (rawManual) {
       return {
@@ -667,6 +758,7 @@ const readStoredManualSnapshot = (): StoredManualSnapshot => {
 
 const getFallbackManualSnapshot = (): StoredManualSnapshot => readStoredManualSnapshot();
 const MAX_UNDO_HISTORY = 20;
+const RESULT_PAGE_SIZE = 20;
 
 const dedupeCategoriesByName = (categories: CategoryDefinition[]) => {
   const categoriesMap = new Map<string, CategoryDefinition>();
@@ -695,6 +787,86 @@ const areManualDataEqual = (
   secondManualData: ManualData,
 ) => JSON.stringify(firstManualData) === JSON.stringify(secondManualData);
 
+const groupEntriesByStorageKey = (entries: KnowledgeEntry[]) =>
+  entries.reduce<Record<string, KnowledgeEntry[]>>((accumulator, entry) => {
+    const storageKey = getEntryChunkStorageKey(entry.categoria);
+    accumulator[storageKey] ??= [];
+    accumulator[storageKey].push(entry);
+    return accumulator;
+  }, {});
+
+const buildManualDataServerPatch = (
+  previousManualData: ManualData,
+  nextManualData: ManualData,
+): ManualDataServerPatch | null => {
+  const patch: ManualDataServerPatch = {};
+
+  if (
+    JSON.stringify(previousManualData.categories) !==
+    JSON.stringify(nextManualData.categories)
+  ) {
+    patch.categories = nextManualData.categories;
+  }
+
+  if (
+    JSON.stringify(previousManualData.deletedCategories ?? []) !==
+    JSON.stringify(nextManualData.deletedCategories ?? [])
+  ) {
+    patch.deletedCategories = nextManualData.deletedCategories ?? [];
+  }
+
+  if (
+    JSON.stringify(previousManualData.settings) !==
+    JSON.stringify(nextManualData.settings)
+  ) {
+    patch.settings = nextManualData.settings;
+  }
+
+  if (
+    JSON.stringify(previousManualData.templates) !==
+    JSON.stringify(nextManualData.templates)
+  ) {
+    patch.templates = nextManualData.templates;
+  }
+
+  if (JSON.stringify(previousManualData.trash) !== JSON.stringify(nextManualData.trash)) {
+    patch.trash = nextManualData.trash;
+  }
+
+  const previousEntryChunks = groupEntriesByStorageKey(previousManualData.entries);
+  const nextEntryChunks = groupEntriesByStorageKey(nextManualData.entries);
+  const allEntryChunkKeys = new Set([
+    ...Object.keys(previousEntryChunks),
+    ...Object.keys(nextEntryChunks),
+  ]);
+  const changedEntryChunks: Record<string, KnowledgeEntry[]> = {};
+  const removedEntryChunkKeys: string[] = [];
+
+  allEntryChunkKeys.forEach((storageKey) => {
+    const previousChunk = previousEntryChunks[storageKey] ?? [];
+    const nextChunk = nextEntryChunks[storageKey] ?? [];
+
+    if (!nextChunk.length && previousChunk.length) {
+      removedEntryChunkKeys.push(storageKey);
+      return;
+    }
+
+    if (JSON.stringify(previousChunk) !== JSON.stringify(nextChunk)) {
+      changedEntryChunks[storageKey] = nextChunk;
+    }
+  });
+
+  if (Object.keys(changedEntryChunks).length) {
+    patch.entryChunks = changedEntryChunks;
+  }
+
+  if (removedEntryChunkKeys.length) {
+    patch.removedEntryChunkKeys = removedEntryChunkKeys;
+  }
+
+  return Object.keys(patch).length ? patch : null;
+};
+
 const persistManualData = (manualData: ManualData) => {
   if (typeof window === 'undefined') {
     return;
@@ -702,7 +874,58 @@ const persistManualData = (manualData: ManualData) => {
 
   // Recordatorio: Si se desarrolla un microservicio Java para centralizar estos Health Checks o gestionar la persistencia de la papelera, utilizar estrictamente try-catch-resources para el cierre seguro de flujos y sockets.
   // Recordatorio: Para cualquier proceso en Java que gestione la lectura o escritura de estos archivos de backup o metadatos de fichas, es obligatorio utilizar try-catch-resources para el cierre seguro de flujos de datos.
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(manualData));
+  const groupedEntries = groupEntriesByStorageKey(manualData.entries);
+
+  const previousEntryChunkKeys = (() => {
+    try {
+      const rawIndex = window.localStorage.getItem(STORAGE_BLOCK_KEYS.entriesIndex);
+      const parsedIndex = rawIndex ? JSON.parse(rawIndex) : [];
+      return Array.isArray(parsedIndex)
+        ? parsedIndex.filter((value): value is string => typeof value === 'string')
+        : [];
+    } catch {
+      return [];
+    }
+  })();
+
+  const nextEntryChunkKeys = Object.keys(groupedEntries).sort((firstKey, secondKey) =>
+    firstKey.localeCompare(secondKey, 'es'),
+  );
+
+  window.localStorage.setItem(
+    STORAGE_BLOCK_KEYS.categories,
+    JSON.stringify(manualData.categories),
+  );
+  window.localStorage.setItem(
+    STORAGE_BLOCK_KEYS.deletedCategories,
+    JSON.stringify(manualData.deletedCategories ?? []),
+  );
+  window.localStorage.setItem(
+    STORAGE_BLOCK_KEYS.settings,
+    JSON.stringify(manualData.settings),
+  );
+  window.localStorage.setItem(
+    STORAGE_BLOCK_KEYS.templates,
+    JSON.stringify(manualData.templates),
+  );
+  window.localStorage.setItem(STORAGE_BLOCK_KEYS.trash, JSON.stringify(manualData.trash));
+  window.localStorage.setItem(
+    STORAGE_BLOCK_KEYS.entriesIndex,
+    JSON.stringify(nextEntryChunkKeys),
+  );
+
+  nextEntryChunkKeys.forEach((storageKey) => {
+    window.localStorage.setItem(storageKey, JSON.stringify(groupedEntries[storageKey] ?? []));
+  });
+
+  previousEntryChunkKeys.forEach((storageKey) => {
+    if (!nextEntryChunkKeys.includes(storageKey)) {
+      window.localStorage.removeItem(storageKey);
+    }
+  });
+
+  // Migra silenciosamente al modelo por bloques y libera el snapshot monolitico anterior.
+  window.localStorage.removeItem(STORAGE_KEY);
 };
 
 const formatSavedAtTime = (date = new Date()) =>
@@ -3115,6 +3338,7 @@ export const App = () => {
   const [resultSortMode, setResultSortMode] =
     useState<ResultSortMode>('pinned-latest');
   const [showPinnedOnly, setShowPinnedOnly] = useState(false);
+  const [currentResultPage, setCurrentResultPage] = useState(1);
   const [draggedResultEntryId, setDraggedResultEntryId] = useState('');
   const [dragOverResultEntryId, setDragOverResultEntryId] = useState('');
   const [draggedHomeCategoryName, setDraggedHomeCategoryName] = useState('');
@@ -3196,6 +3420,9 @@ export const App = () => {
     useState<ServerHealthState>('checking');
 
   const manualServerRevisionRef = useRef('');
+  const lastPersistedManualDataRef = useRef<ManualData>(
+    initialManualSnapshotRef.current.manualData,
+  );
   const shouldPersistToServerRef = useRef(false);
   const hasMountedRef = useRef(false);
   const customization = manualData.settings.customization;
@@ -3372,6 +3599,14 @@ export const App = () => {
     () => sortEntries(visibleResults, resultSortMode),
     [customEntryOrderByCategory, resultSortMode, visibleResults],
   );
+  const totalResultPages = Math.max(
+    1,
+    Math.ceil(sortedResults.length / RESULT_PAGE_SIZE),
+  );
+  const paginatedResults = useMemo(() => {
+    const startIndex = (currentResultPage - 1) * RESULT_PAGE_SIZE;
+    return sortedResults.slice(startIndex, startIndex + RESULT_PAGE_SIZE);
+  }, [currentResultPage, sortedResults]);
   const quickAccessEntries = useMemo(
     () =>
       sortEntries(
@@ -3592,6 +3827,22 @@ export const App = () => {
   }, [searchTerm]);
 
   useEffect(() => {
+    setCurrentResultPage(1);
+  }, [
+    activeCategoryFilter,
+    activeTagFilters,
+    debouncedSearchTerm,
+    resultSortMode,
+    showPinnedOnly,
+  ]);
+
+  useEffect(() => {
+    setCurrentResultPage((currentPage) =>
+      currentPage > totalResultPages ? totalResultPages : currentPage,
+    );
+  }, [totalResultPages]);
+
+  useEffect(() => {
     if (modalState?.type === 'entry') {
       setEntryEditorViewMode('editor');
       setIsEntryContextCollapsed(false);
@@ -3713,6 +3964,7 @@ export const App = () => {
         if (!isCancelled) {
           persistManualData(serverManual);
           setManualData(serverManual);
+          lastPersistedManualDataRef.current = serverManual;
           manualServerRevisionRef.current = typeof revision === 'string' ? revision : '';
           setHasSaveConflict(false);
           setManualOriginState('server');
@@ -3772,6 +4024,7 @@ export const App = () => {
 
       persistManualData(serverManual);
       setManualData(serverManual);
+      lastPersistedManualDataRef.current = serverManual;
       manualServerRevisionRef.current = typeof revision === 'string' ? revision : '';
       setHasSaveConflict(false);
       setManualOriginState('server');
@@ -3799,6 +4052,14 @@ export const App = () => {
     }
 
     shouldPersistToServerRef.current = false;
+    const manualPatch = buildManualDataServerPatch(
+      lastPersistedManualDataRef.current,
+      manualData,
+    );
+
+    if (!manualPatch) {
+      return;
+    }
 
     let isCancelled = false;
     const timeoutId = window.setTimeout(() => {
@@ -3806,13 +4067,13 @@ export const App = () => {
     const persistManualOnServer = async () => {
       setSaveSyncState('saving');
       try {
-        const response = await fetch(`${getApiBaseUrl()}/save-manual`, {
+        const response = await fetch(`${getApiBaseUrl()}/save-manual-blocks`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            data: manualData,
+            data: manualPatch,
             expectedRevision: manualServerRevisionRef.current || undefined,
           }),
         });
@@ -3834,6 +4095,7 @@ export const App = () => {
         }
 
         if (!isCancelled) {
+          lastPersistedManualDataRef.current = manualData;
           manualServerRevisionRef.current =
             typeof payload.revision === 'string' ? payload.revision : '';
           setHasSaveConflict(false);
@@ -8118,11 +8380,43 @@ export const App = () => {
                   Arrastra las fichas dentro de esta sección para guardar un orden personalizado.
                 </p>
               ) : null}
+              {sortedResults.length > RESULT_PAGE_SIZE ? (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
+                  <span>
+                    Mostrando {paginatedResults.length} de {sortedResults.length} fichas en la página {currentResultPage} de {totalResultPages}.
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setCurrentResultPage((currentPage) => Math.max(1, currentPage - 1))}
+                      disabled={currentResultPage === 1}
+                      className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800"
+                    >
+                      Anterior
+                    </button>
+                    <span className="rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                      {currentResultPage} / {totalResultPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setCurrentResultPage((currentPage) =>
+                          Math.min(totalResultPages, currentPage + 1),
+                        )
+                      }
+                      disabled={currentResultPage === totalResultPages}
+                      className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800"
+                    >
+                      Siguiente
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               </div>
 
               {sortedResults.length ? (
                 <div className="grid gap-3">
-                  {sortedResults.map((entry) => {
+                  {paginatedResults.map((entry) => {
                     const category = categoryMap.get(entry.categoria.toLowerCase());
                     const canDragResultCard =
                       Boolean(activeCategoryFilter) &&
