@@ -4067,24 +4067,48 @@ export const App = () => {
     const persistManualOnServer = async () => {
       setSaveSyncState('saving');
       try {
-        const response = await fetch(`${getApiBaseUrl()}/save-manual-blocks`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            data: manualPatch,
-            expectedRevision: manualServerRevisionRef.current || undefined,
-          }),
-        });
+        const postSavePayload = async (
+          endpoint: 'save-manual' | 'save-manual-blocks',
+          data: ManualData | ManualDataServerPatch,
+        ) => {
+          const response = await fetch(`${getApiBaseUrl()}/${endpoint}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              data,
+              expectedRevision: manualServerRevisionRef.current || undefined,
+            }),
+          });
 
-        const payload = (await response
-          .json()
-          .catch(() => ({}))) as {
-          currentRevision?: string;
-          error?: string;
-          revision?: string;
+          const payload = (await response
+            .json()
+            .catch(() => ({}))) as {
+            currentRevision?: string;
+            error?: string;
+            revision?: string;
+          };
+
+          return {
+            payload,
+            response,
+          };
         };
+
+        let saveResult = await postSavePayload('save-manual-blocks', manualPatch);
+
+        if (
+          !saveResult.response.ok &&
+          saveResult.response.status !== 409 &&
+          (saveResult.response.status === 404 ||
+            saveResult.response.status === 405 ||
+            saveResult.response.status >= 500)
+        ) {
+          saveResult = await postSavePayload('save-manual', manualData);
+        }
+
+        const { payload, response } = saveResult;
 
         if (response.status === 409 || payload.error === 'save-conflict') {
           throw new Error('save-conflict');
